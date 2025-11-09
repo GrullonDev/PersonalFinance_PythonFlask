@@ -7,6 +7,7 @@ from fastapi import HTTPException, status
 from firebase_admin import auth, credentials
 
 from app.core.config import settings
+from app.services.local_token import try_decode_local_token
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ def _initialize_firebase_app() -> firebase_admin.App:
 
 def verify_firebase_token(token: str) -> Dict[str, Any]:
     """Validate Firebase JWT and return decoded claims."""
+    local_payload = try_decode_local_token(token)
+    if local_payload is not None:
+        return local_payload
+
     if settings.ALLOW_TEST_TOKENS and settings.ENVIRONMENT != "production":
         # Permite usar el propio token como UID en desarrollo/test (p.ej. 'test-uid-123')
         return {"uid": token}

@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 from secrets import token_urlsafe
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi.responses import JSONResponse
+import logging
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,7 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.profile import Profile
 from app.models.user import User
 from app.schema.auth import (
+    LocalLoginResponse,
     LocalUserRead,
     LoginRequest,
     MessageResponse,
@@ -22,10 +25,12 @@ from app.schema.auth import (
     RegisterRequest,
 )
 from app.services.email import send_password_reset_email
+from app.services.local_token import create_local_access_token
 from app.services.security import hash_password, verify_password
 
 
 router = APIRouter(tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 def _normalize(text: str) -> str:
@@ -51,7 +56,24 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)) -> Lo
             detail="Ya existe un usuario con ese nombre de usuario",
         )
 
-    firebase_uid = f"local-{uuid4()}"
+    firebase_uid_candidate = payload.normalized_firebase_uid()
+    if firebase_uid_candidate is not None:
+        firebase_uid = firebase_uid_candidate
+        if not firebase_uid:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El Firebase UID no puede estar vacío",
+            )
+
+        firebase_exists_stmt = select(Profile.id).where(Profile.firebase_uid == firebase_uid)
+        if db.execute(firebase_exists_stmt).scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un usuario con ese Firebase UID",
+            )
+    else:
+        firebase_uid = f"local-{uuid4()}"
+
     nombre_completo = f"{payload.nombres} {payload.apellidos}".strip()
 
     profile = Profile(
@@ -69,6 +91,9 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)) -> Lo
     if user is None:
         user = User(id=firebase_uid, email=email, nombre=nombre_completo)
         db.add(user)
+    else:
+        user.email = email or user.email
+        user.nombre = nombre_completo or user.nombre
 
     db.flush()
 
@@ -79,27 +104,22 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)) -> Lo
     return LocalUserRead.model_validate(profile, from_attributes=True)
 
 
-@router.post("/login", response_model=LocalUserRead)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LocalUserRead:
-    identifier = _normalize(payload.identificador)
+@router.post("/login", response_model=LocalLoginResponse)
+def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)) -> LocalLoginResponse:
+    email = payload.normalized_email()
 
-    profile_stmt = (
-        select(Profile)
-        .join(LocalCredential, LocalCredential.profile_id == Profile.id)
-        .where(
-            or_(
-                func.lower(Profile.email) == identifier,
-                func.lower(Profile.username) == identifier,
-            )
-        )
-    )
+    profile_stmt = select(Profile).where(func.lower(Profile.email) == email)
     profile = db.execute(profile_stmt).scalar_one_or_none()
+    if profile is not None:
+        db.refresh(profile, attribute_names=["local_credential"])
 
     if profile is None or profile.local_credential is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+        logger.warning("Profile or credentials missing for email=%s", email)
+        return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Credenciales inválidas"})
 
     if not verify_password(payload.password, profile.local_credential.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+        logger.warning("Password mismatch for profile_id=%s", profile.id)
+        return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Credenciales inválidas"})
 
     now = datetime.now(timezone.utc)
     profile.local_credential.ultimo_login = now
@@ -108,7 +128,17 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LocalUserRead
     if user is not None:
         user.ultimo_acceso = now
 
-    return LocalUserRead.model_validate(profile, from_attributes=True)
+    user_read = LocalUserRead.model_validate(profile, from_attributes=True)
+    access_token = create_local_access_token(
+        firebase_uid=profile.firebase_uid,
+        email=profile.email,
+        nombre=profile.nombre_completo,
+    )
+
+    response_payload = LocalLoginResponse(access_token=access_token, token_type="bearer", user=user_read)
+    # Deja que FastAPI serialice el modelo (maneja datetimes). Solo añadimos el header.
+    response.headers["Authorization"] = f"Bearer {access_token}"
+    return response_payload
 
 
 @router.post(
@@ -172,7 +202,11 @@ def reset_password(
     if reset_token.usado_en is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token de recuperación inválido")
 
-    if reset_token.expires_at <= datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    expires_at = reset_token.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token de recuperación expirado")
 
     profile = reset_token.profile
@@ -181,8 +215,9 @@ def reset_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La cuenta no permite restablecimiento local")
 
     profile.local_credential.password_hash = hash_password(payload.password)
+    db.add(profile.local_credential)
+    db.flush()
 
-    now = datetime.now(timezone.utc)
     reset_token.usado_en = now
 
     for other in profile.password_reset_tokens:

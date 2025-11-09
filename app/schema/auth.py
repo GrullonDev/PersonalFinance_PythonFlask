@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -10,6 +11,7 @@ class RegisterRequest(BaseModel):
     apellidos: str = Field(min_length=1, max_length=150)
     fecha_nacimiento: date | None = None
     username: str = Field(min_length=3, max_length=80, pattern=r"^[a-zA-Z0-9_.-]+$")
+    firebase_uid: str | None = Field(default=None, min_length=1, max_length=128)
     email: EmailStr
     email_confirmacion: EmailStr
     password: str = Field(min_length=8, max_length=128)
@@ -29,10 +31,18 @@ class RegisterRequest(BaseModel):
     def normalized_username(self) -> str:
         return self.username.lower()
 
+    def normalized_firebase_uid(self) -> str | None:
+        if self.firebase_uid is None:
+            return None
+        return self.firebase_uid.strip()
+
 
 class LoginRequest(BaseModel):
-    identificador: str = Field(min_length=1)
+    email: EmailStr
     password: str = Field(min_length=1)
+
+    def normalized_email(self) -> str:
+        return self.email.strip().lower()
 
 
 class PasswordRecoveryRequest(BaseModel):
@@ -64,6 +74,12 @@ class LocalUserRead(BaseModel):
     fecha_nacimiento: date | None
     fecha_creacion: datetime
     fecha_actualizacion: datetime
+
+
+class LocalLoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    user: LocalUserRead
 
 
 class MessageResponse(BaseModel):

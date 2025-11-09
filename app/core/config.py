@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +37,37 @@ class Settings(BaseSettings):
         default=None,
         description="URL base usada para construir enlaces de restablecimiento (e.g. https://app/reset?token=)",
     )
+    LOCAL_AUTH_SECRET: str = Field(
+        default="dev-local-secret-change-me",
+        description="Clave HMAC usada para firmar tokens locales emitidos por el backend.",
+    )
+    LOCAL_AUTH_TOKEN_EXPIRES_MINUTES: int = Field(
+        default=60,
+        description="Minutos de validez para los tokens locales generados tras el login.",
+        ge=1,
+    )
+
+    @model_validator(mode="after")
+    def _ensure_local_auth_secret(self) -> "Settings":
+        """Garantiza que `LOCAL_AUTH_SECRET` nunca sea una cadena vacía.
+
+        - En desarrollo (no "production"), si viene vacío desde el entorno,
+          forzamos el valor por defecto de desarrollo para evitar errores 500 en
+          tiempo de ejecución.
+        - En producción, exigimos que tenga un valor no vacío y fallamos
+          explícitamente en el arranque con un mensaje claro.
+        """
+        secret = (self.LOCAL_AUTH_SECRET or "").strip()
+        if not secret:
+            if self.ENVIRONMENT != "production":
+                # Restablece el valor seguro por defecto de dev si el entorno lo
+                # proporcionó vacío (lo que eclipsa el default del Field).
+                self.LOCAL_AUTH_SECRET = "dev-local-secret-change-me"
+            else:
+                raise ValueError(
+                    "LOCAL_AUTH_SECRET debe estar configurado en producción y no puede estar vacío"
+                )
+        return self
 
 
 @lru_cache

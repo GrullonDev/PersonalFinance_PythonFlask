@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import Date, Integer, String, UniqueConstraint
+from sqlalchemy import Date, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -10,9 +10,6 @@ from app.models.base import Base, TimestampMixin
 
 class Profile(Base, TimestampMixin):
     __tablename__ = "profiles"
-    __table_args__ = (
-        UniqueConstraint("username", name="uq_profiles_username"),
-    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     firebase_uid: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
@@ -33,4 +30,7 @@ class Profile(Base, TimestampMixin):
     )
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         back_populates="profile", cascade="all, delete-orphan"
+    )
+    notification_preference: Mapped["NotificationPreference | None"] = relationship(
+        back_populates="profile", cascade="all, delete-orphan", uselist=False
     )

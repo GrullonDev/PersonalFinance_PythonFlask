@@ -37,6 +37,7 @@ Servicio backend en FastAPI para gestionar finanzas personales (perfiles, catego
    - `DATABASE_URL`: `sqlite:///./personal_finance.db` para desarrollo o URL de PostgreSQL (`postgresql+psycopg://user:pass@host:5432/db`).
    - `FIREBASE_CREDENTIALS_PATH`: ruta absoluta al JSON del service account.
    - `ALLOW_TEST_TOKENS=true` permite usar tokens ficticios (el valor del token se toma como UID) cuando no haya credenciales válidas. Desactívalo en producción.
+   - Para recuperación de contraseñas vía email configura `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `EMAIL_SENDER` y `PASSWORD_RESET_URL` (frontend que consumirá el token).
 
 4. Ejecutar las migraciones (en entornos no productivos la aplicación las ejecuta automáticamente al iniciar, pero es útil correrlas manualmente en scripting o CI/CD):
 
@@ -69,6 +70,18 @@ docker run --rm -p 8000:8000 --env-file .env personal-finance-api
   - `POST /api/v1/auth/recover-password`: genera un token de recuperación (almacenado en base de datos) usando usuario o email sin revelar si la cuenta existe.
   - Recuerda ejecutar las migraciones (`alembic upgrade head`) para crear las tablas `local_credentials` y `password_reset_tokens`.
   - Para ejecutar los endpoints locales es necesario instalar la dependencia `passlib[bcrypt]` incluida en `requirements.txt`.
+  - Autenticación local firma tokens JWT con `HS256`. Configura `LOCAL_AUTH_SECRET` para definir la clave HMAC:
+    - En desarrollo, si la variable está ausente o vacía, la app usará automáticamente `dev-local-secret-change-me` para evitar errores 500.
+    - En producción es obligatorio establecer un secreto no vacío; la app fallará en el arranque si no está configurado.
+
+## Endpoints clave para tu app móvil
+
+- `POST /api/v1/transactions/` crea transacción (ingreso/gasto) con campos: `tipo`, `monto`, `descripcion?`, `fecha`, `categoria_id`, `es_recurrente`.
+- `POST /api/v1/budgets/` crea presupuesto con `nombre`, `monto_total`, `fecha_inicio`, `fecha_fin`.
+- `POST /api/v1/goals/` crea meta con `nombre`, `monto_objetivo`, `monto_actual`, `fecha_limite`, `icono?`.
+- `POST /api/v1/categories/` crea categoría rápida con `nombre` y `tipo` (para el formulario del perfil).
+- `GET /api/v1/notifications/preferences` obtiene preferencias de notificaciones del perfil autenticado (si no existen, se crean con valores por defecto).
+- `PUT /api/v1/notifications/preferences` actualiza preferencias con cualquier subconjunto de: `email_enabled`, `push_enabled`, `marketing_enabled`.
   - Configura un servicio SMTP si deseas enviar correos reales (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `EMAIL_SENDER`) y, opcionalmente, la URL base que consume el frontend (`PASSWORD_RESET_URL`). Si no se configuran, la app registrará en logs el token de recuperación.
 
 ## Pruebas automatizadas

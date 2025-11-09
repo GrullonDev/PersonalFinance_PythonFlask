@@ -20,8 +20,7 @@ def upgrade() -> None:
     op.add_column("profiles", sa.Column("apellidos", sa.String(length=150), nullable=True))
     op.add_column("profiles", sa.Column("fecha_nacimiento", sa.Date(), nullable=True))
     op.add_column("profiles", sa.Column("username", sa.String(length=80), nullable=True))
-    op.create_unique_constraint("uq_profiles_username", "profiles", ["username"])
-    op.create_index(op.f("ix_profiles_username"), "profiles", ["username"], unique=False)
+    op.create_index(op.f("ix_profiles_username"), "profiles", ["username"], unique=True)
 
     op.create_table(
         "local_credentials",
@@ -69,7 +68,6 @@ def downgrade() -> None:
     op.drop_table("password_reset_tokens")
     op.drop_table("local_credentials")
     op.drop_index(op.f("ix_profiles_username"), table_name="profiles")
-    op.drop_constraint("uq_profiles_username", "profiles", type_="unique")
     op.drop_column("profiles", "username")
     op.drop_column("profiles", "fecha_nacimiento")
     op.drop_column("profiles", "apellidos")

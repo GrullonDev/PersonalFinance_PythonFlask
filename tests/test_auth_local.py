@@ -1,4 +1,5 @@
 from datetime import date
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,11 +23,13 @@ def _registration_payload(**overrides: object) -> dict[str, object]:
         "password_confirmacion": "S3gura!123",
     }
     payload.update(overrides)
+    payload.setdefault("firebase_uid", f"firebase-{uuid4()}")
     return payload
 
 
 def test_register_creates_profile_and_credentials(client: TestClient, db_session: Session):
-    response = client.post("/api/v1/auth/register", json=_registration_payload())
+    firebase_uid = "firebase-ana"
+    response = client.post("/api/v1/auth/register", json=_registration_payload(firebase_uid=firebase_uid))
     assert response.status_code == 201
     data = response.json()
 
@@ -35,6 +38,7 @@ def test_register_creates_profile_and_credentials(client: TestClient, db_session
     assert data["nombres"] == "Ana"
     assert data["apellidos"] == "Pérez"
     assert data["nombre_completo"] == "Ana Pérez"
+    assert data["firebase_uid"] == firebase_uid
 
     profile = db_session.get(Profile, data["id"])
     assert profile is not None
@@ -64,23 +68,44 @@ def test_register_rejects_duplicate_username(client: TestClient):
     assert response_dup.json()["detail"] == "Ya existe un usuario con ese nombre de usuario"
 
 
-def test_login_accepts_username_and_email(client: TestClient, db_session: Session):
+def test_register_rejects_duplicate_firebase_uid(client: TestClient):
+    firebase_uid = "firebase-duplicado"
+    first_payload = _registration_payload(
+        email="uno@example.com",
+        email_confirmacion="uno@example.com",
+        username="usuario.uno",
+        firebase_uid=firebase_uid,
+    )
+    second_payload = _registration_payload(
+        email="dos@example.com",
+        email_confirmacion="dos@example.com",
+        username="usuario.dos",
+        firebase_uid=firebase_uid,
+    )
+
+    first = client.post("/api/v1/auth/register", json=first_payload)
+    assert first.status_code == 201
+
+    duplicate = client.post("/api/v1/auth/register", json=second_payload)
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "Ya existe un usuario con ese Firebase UID"
+
+
+def test_login_with_email_returns_token_header(client: TestClient, db_session: Session):
     payload = _registration_payload()
     register_response = client.post("/api/v1/auth/register", json=payload)
     profile_id = register_response.json()["id"]
 
-    login_with_username = client.post(
+    login_response = client.post(
         "/api/v1/auth/login",
-        json={"identificador": payload["username"], "password": payload["password"]},
+        json={"email": payload["email"], "password": payload["password"]},
     )
-    assert login_with_username.status_code == 200
-    assert login_with_username.json()["id"] == profile_id
-
-    login_with_email = client.post(
-        "/api/v1/auth/login",
-        json={"identificador": payload["email"], "password": payload["password"]},
-    )
-    assert login_with_email.status_code == 200
+    assert login_response.status_code == 200
+    response_data = login_response.json()
+    assert response_data["user"]["id"] == profile_id
+    assert response_data["access_token"]
+    assert response_data["token_type"] == "bearer"
+    assert login_response.headers.get("Authorization") == f"Bearer {response_data['access_token']}"
 
     credential = db_session.execute(
         select(LocalCredential).join(Profile).where(Profile.id == profile_id)
@@ -89,13 +114,37 @@ def test_login_accepts_username_and_email(client: TestClient, db_session: Sessio
     assert credential.ultimo_login is not None
 
 
+def test_local_login_token_allows_authenticated_requests(client: TestClient):
+    payload = _registration_payload()
+    register_response = client.post("/api/v1/auth/register", json=payload)
+    assert register_response.status_code == 201
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={"email": payload["email"], "password": payload["password"]},
+    )
+    assert login_response.status_code == 200
+    login_data = login_response.json()
+    token = login_data["access_token"]
+    assert token
+    assert login_response.headers.get("Authorization") == f"Bearer {token}"
+
+    profile_response = client.get(
+        "/api/v1/profiles/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert profile_response.status_code == 200
+    profile_data = profile_response.json()
+    assert profile_data["firebase_uid"] == login_data["user"]["firebase_uid"]
+
+
 def test_login_rejects_invalid_password(client: TestClient):
     payload = _registration_payload()
     client.post("/api/v1/auth/register", json=payload)
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"identificador": payload["username"], "password": "ContraseñaErrónea1"},
+        json={"email": payload["email"], "password": "ContraseñaErrónea1"},
     )
     assert response.status_code == 401
     assert response.json()["detail"] == "Credenciales inválidas"
@@ -176,15 +225,18 @@ def test_password_reset_with_valid_token(client: TestClient, db_session: Session
 
     login_old = client.post(
         "/api/v1/auth/login",
-        json={"identificador": payload["email"], "password": payload["password"]},
+        json={"email": payload["email"], "password": payload["password"]},
     )
     assert login_old.status_code == 401
 
     login_new = client.post(
         "/api/v1/auth/login",
-        json={"identificador": payload["email"], "password": new_password},
+        json={"email": payload["email"], "password": new_password},
     )
     assert login_new.status_code == 200
+    login_new_data = login_new.json()
+    assert login_new_data["access_token"]
+    assert login_new_data["token_type"] == "bearer"
 
     token_row = db_session.execute(
         select(PasswordResetToken).where(PasswordResetToken.token == token)
